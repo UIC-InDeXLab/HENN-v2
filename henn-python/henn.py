@@ -3,6 +3,8 @@ from epsnet.base_epsnet import BaseEPSNet
 from epsnet.random_sample import RandomSample
 from pgraphs.base_pgraph import BaseProximityGraph
 from pgraphs.knn import Knn
+from pgraphs.nsw import NSW
+from pgraphs.nsg import NSG
 import math
 import logging
 
@@ -12,7 +14,7 @@ class HENNConfig:
         self,
         epsnet_algorithm: str = "random",  # random, discrepancy, budget-aware
         epsnet_params: dict = None,
-        pgraph_algorithm: str = "NSW",  # nsw, knn
+        pgraph_algorithm: str = "NSW",  # nsw, knn, nsg
         pgraph_params: dict = None,
         enable_logging: bool = False,
         log_level: str = "INFO",
@@ -20,9 +22,34 @@ class HENNConfig:
         # TODO: build an instance of base_epsnet
         self.epsnet_algorithm = RandomSample()
         self.epsnet_params = epsnet_params or {}
-        # TODO: build an instance of base_pgraph
-        self.pgraph_algorithm = Knn()
-        self.pgraph_params = pgraph_params or {}
+        
+        # Build an instance of base_pgraph based on algorithm choice
+        if pgraph_algorithm.lower() == "knn":
+            self.pgraph_algorithm = Knn()
+            # Provide default parameters for KNN if none specified
+            if not pgraph_params:
+                self.pgraph_params = {"k": 16}
+            else:
+                self.pgraph_params = pgraph_params
+        elif pgraph_algorithm.lower() == "nsw":
+            self.pgraph_algorithm = NSW()
+            # Provide default parameters for NSW if none specified
+            if not pgraph_params:
+                self.pgraph_params = {"M": 16, "efConstruction": 200}
+            else:
+                self.pgraph_params = pgraph_params
+        elif pgraph_algorithm.lower() == "nsg":
+            self.pgraph_algorithm = NSG()
+            # Provide default parameters for NSG if none specified
+            if not pgraph_params:
+                self.pgraph_params = {"R": 16, "L": 100, "C": 300}
+            else:
+                self.pgraph_params = pgraph_params
+        else:
+            # Default to NSW
+            self.pgraph_algorithm = NSW()
+            self.pgraph_params = pgraph_params or {"M": 16, "efConstruction": 200}
+            
         self.enable_logging = enable_logging
         self.log_level = log_level
 
