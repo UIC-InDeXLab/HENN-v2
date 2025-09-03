@@ -278,6 +278,106 @@ class TestNSG(unittest.TestCase):
         for node in edges1:
             self.assertEqual(set(edges1[node]), set(edges2[node]))
 
+    def test_nsg_get_initial_search_node(self):
+        """Test get_initial_search_node functionality for NSG."""
+        points = np.random.rand(15, 2)
+        layer_indices = list(range(15))
+        params = {"R": 5, "L": 10, "C": 15}
+
+        # Build the graph first
+        edges = self.nsg.build_graph(points, layer_indices, params)
+
+        # Test that initial node is the medoid (navigation node)
+        initial_node = self.nsg.get_initial_search_node(points, layer_indices, edges)
+        self.assertIn(initial_node, layer_indices, "Initial node should be in layer")
+
+        # For NSG, the initial node should be the medoid
+        expected_medoid = self.nsg._find_medoid(points, layer_indices)
+        self.assertEqual(
+            initial_node, expected_medoid,
+            f"Initial node {initial_node} should be medoid {expected_medoid}"
+        )
+
+        # Test multiple calls return same node
+        initial_node2 = self.nsg.get_initial_search_node(points, layer_indices, edges)
+        self.assertEqual(initial_node, initial_node2, "Should return same medoid consistently")
+
+        # Test with empty layer
+        empty_initial = self.nsg.get_initial_search_node(points, [], edges)
+        self.assertIsNone(empty_initial, "Empty layer should return None")
+
+        # Test with single node
+        single_node_initial = self.nsg.get_initial_search_node(points, layer_indices, edges)
+        self.assertEqual(single_node_initial, 8, "Single node layer should return that node")
+
+        print("✓ NSG get_initial_search_node test passed")
+
+    def test_nsg_medoid_consistency(self):
+        """Test that NSG consistently finds the same medoid for the same data."""
+        # Create points where medoid is clearly identifiable
+        points = np.array([
+            [0.0, 0.0],   # Center point - should be medoid
+            [1.0, 1.0], [1.0, -1.0], [-1.0, 1.0], [-1.0, -1.0],  # Corner points
+            [2.0, 2.0], [2.0, -2.0], [-2.0, 2.0], [-2.0, -2.0]   # Far corner points
+        ])
+        layer_indices = list(range(9))
+
+        # Find medoid directly
+        medoid1 = self.nsg._find_medoid(points, layer_indices)
+        medoid2 = self.nsg._find_medoid(points, layer_indices)
+        
+        # Should be consistent
+        self.assertEqual(medoid1, medoid2, "Medoid finding should be deterministic")
+        
+        # The center point (index 0) should be the medoid
+        self.assertEqual(medoid1, 0, "Center point should be identified as medoid")
+
+        # Test that get_initial_search_node returns this medoid
+        params = {"R": 3, "L": 8, "C": 10}
+        edges = self.nsg.build_graph(points, layer_indices, params)
+        initial_node = self.nsg.get_initial_search_node(points, layer_indices, edges)
+        self.assertEqual(initial_node, 0, "Initial search node should be the medoid")
+
+        print("✓ NSG medoid consistency test passed")
+
+    def test_nsg_initial_node_optimality(self):
+        """Test that NSG's initial node (medoid) is actually optimal."""
+        points = np.random.rand(12, 3)
+        layer_indices = list(range(12))
+
+        # Build graph
+        params = {"R": 4, "L": 8, "C": 12}
+        edges = self.nsg.build_graph(points, layer_indices, params)
+        
+        # Get the medoid
+        medoid = self.nsg.get_initial_search_node(points, layer_indices, edges)
+        
+        # Calculate sum of distances from medoid to all other points
+        medoid_point = points[medoid]
+        medoid_sum_dist = sum(
+            np.linalg.norm(points[idx] - medoid_point) 
+            for idx in layer_indices if idx != medoid
+        )
+
+        # Check that no other point has a smaller sum of distances
+        for other_idx in layer_indices:
+            if other_idx == medoid:
+                continue
+                
+            other_point = points[other_idx]
+            other_sum_dist = sum(
+                np.linalg.norm(points[idx] - other_point) 
+                for idx in layer_indices if idx != other_idx
+            )
+            
+            self.assertLessEqual(
+                medoid_sum_dist, other_sum_dist,
+                f"Medoid {medoid} sum_dist {medoid_sum_dist:.3f} should be <= "
+                f"point {other_idx} sum_dist {other_sum_dist:.3f}"
+            )
+
+        print(f"✓ NSG medoid optimality test passed: medoid={medoid}, sum_dist={medoid_sum_dist:.3f}")
+
 
 class TestNSGIntegration(unittest.TestCase):
     """Integration tests for NSG with other components."""

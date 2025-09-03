@@ -9,5 +9,7 @@ from .base_pgraph import BaseProximityGraph
 from .knn import Knn
 from .nsw import NSW
 from .nsg import NSG
+from .fanng import FANNG
+from .kgraph import KGraph
 
-__all__ = ['BaseProximityGraph', 'Knn', 'NSW', 'NSG']
+__all__ = ['BaseProximityGraph', 'Knn', 'NSW', 'NSG', 'FANNG', 'KGraph']

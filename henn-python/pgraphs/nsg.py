@@ -15,6 +15,10 @@ class NSG(BaseProximityGraph):
     3. Ensure strong connectivity through pruning and reconnection
     """
 
+    def __init__(self):
+        """Initialize NSG graph."""
+        self.init_node = None
+
     def build_graph(
         self, henn_points: np.ndarray, layer_indices: list, params: dict = None
     ):
@@ -66,7 +70,34 @@ class NSG(BaseProximityGraph):
             henn_points, layer_indices, nsg_graph, navigation_node
         )
 
+        self.init_node = navigation_node
+
         return final_graph
+
+    def get_initial_search_node(
+        self, henn_points: np.ndarray, layer_indices: list, edges: dict = None
+    ):
+        """
+        For NSG graphs, use the medoid (navigation node) as the initial search node.
+        This is the optimal entry point for NSG as it's designed to be the most central node.
+
+        Args:
+            henn_points: All points in the HENN structure
+            layer_indices: List of global indices for points in this layer
+            edges: Adjacency list (not used for NSG as we compute medoid)
+
+        Returns:
+            Global index of the medoid (navigation node)
+        """
+        if not layer_indices:
+            return None
+
+        # Find and return the medoid (same logic as used in build_graph)
+        return (
+            self.init_node
+            if self.init_node is not None
+            else np.random.choice(layer_indices)
+        )
 
     def _find_medoid(self, henn_points: np.ndarray, layer_indices: list) -> int:
         """

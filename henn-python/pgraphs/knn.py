@@ -31,3 +31,21 @@ class Knn(BaseProximityGraph):
             edges[layer_indices[i]] = [layer_indices[j] for j in nearest_indices]
 
         return edges
+
+    def get_initial_search_node(
+        self, henn_points: np.ndarray, layer_indices: list, edges: dict = None
+    ):
+        """
+        For k-NN graphs, use random selection as all nodes are equivalent.
+
+        Args:
+            henn_points: All points in the HENN structure
+            layer_indices: List of global indices for points in this layer
+            edges: Adjacency list (not used for k-NN)
+
+        Returns:
+            Global index of a random node
+        """
+        if not layer_indices:
+            return None
+        return np.random.choice(layer_indices)

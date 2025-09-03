@@ -5,6 +5,10 @@ import heapq
 
 
 class NSW(BaseProximityGraph):
+    def __init__(self):
+        """Initialize NSW graph."""
+        self.init_node = None
+
     def build_graph(
         self, henn_points: np.ndarray, layer_indices: list, params: dict = None
     ):
@@ -72,6 +76,9 @@ class NSW(BaseProximityGraph):
 
             # Add current point to inserted set
             inserted_indices.append(current_idx)
+
+        # Find the highest degree node for use as initial search node
+        self._find_highest_degree(edges, layer_indices)
 
         return edges
 
@@ -196,3 +203,42 @@ class NSW(BaseProximityGraph):
 
         # Update the node's adjacency list
         edges[node_idx] = closest_neighbors
+
+    def _find_highest_degree(self, edges, layer_indices):
+        # Find node with highest degree
+        max_degree = -1
+        best_node = None
+
+        for node_idx in layer_indices:
+            degree = len(edges.get(node_idx, []))
+            if degree > max_degree:
+                max_degree = degree
+                best_node = node_idx
+        self.init_node = best_node
+
+    def get_initial_search_node(
+        self, henn_points: np.ndarray, layer_indices: list, edges: dict = None
+    ):
+        """
+        For NSW graphs, select the node with highest degree as it's likely to be well-connected.
+        If edges not available or all have same degree, use random selection.
+
+        Args:
+            henn_points: All points in the HENN structure
+            layer_indices: List of global indices for points in this layer
+            edges: Adjacency list (used to find highest degree node)
+
+        Returns:
+            Global index of the node with highest degree
+        """
+        if not layer_indices:
+            return None
+
+        if edges is None:
+            return np.random.choice(layer_indices)
+
+        return (
+            self.init_node
+            if self.init_node is not None
+            else np.random.choice(layer_indices)
+        )

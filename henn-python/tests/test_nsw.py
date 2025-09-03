@@ -190,6 +190,75 @@ class TestNSW(unittest.TestCase):
 
         print("✓ NSW efConstruction parameter test passed")
 
+    def test_nsw_get_initial_search_node(self):
+        """Test get_initial_search_node functionality for NSW."""
+        points = np.random.rand(10, 2)
+        layer_indices = list(range(10))
+        params = {"M": 3}
+
+        # Build the graph first
+        edges = self.nsw.build_graph(points, layer_indices, params)
+
+        # Test with edges provided - should return highest degree node
+        initial_node = self.nsw.get_initial_search_node(points, layer_indices, edges)
+        self.assertIn(initial_node, layer_indices, "Initial node should be in layer")
+
+        # Verify it's actually the highest degree node (or one of them if tie)
+        max_degree = max(len(neighbors) for neighbors in edges.values())
+        initial_degree = len(edges[initial_node])
+        self.assertEqual(
+            initial_degree, max_degree, 
+            f"Initial node degree {initial_degree} should equal max degree {max_degree}"
+        )
+
+        # Test with no edges provided - should return random node
+        np.random.seed(123)
+        initial_node_no_edges = self.nsw.get_initial_search_node(points, layer_indices, None)
+        self.assertIn(initial_node_no_edges, layer_indices, "Random initial node should be in layer")
+
+        # Test with empty layer
+        empty_initial = self.nsw.get_initial_search_node(points, [], edges)
+        self.assertIsNone(empty_initial, "Empty layer should return None")
+
+        # Test reproducibility with same edges
+        initial_node2 = self.nsw.get_initial_search_node(points, layer_indices, edges)
+        self.assertEqual(initial_node, initial_node2, "Should return same node with same graph")
+
+        print("✓ NSW get_initial_search_node test passed")
+
+    def test_nsw_initial_node_degree_analysis(self):
+        """Test that NSW initial node selection prefers high-degree nodes."""
+        # Create a star topology where one node is connected to many others
+        points = np.array([
+            [0.5, 0.5],  # Center node (should have highest degree)
+            [0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0],  # Corner nodes
+            [0.2, 0.8], [0.8, 0.2], [0.3, 0.7], [0.7, 0.3]   # Other nodes
+        ])
+        layer_indices = list(range(9))
+        params = {"M": 6}  # High connectivity to create clear degree differences
+
+        edges = self.nsw.build_graph(points, layer_indices, params)
+
+        # Get initial node multiple times to see if it consistently picks high-degree nodes
+        initial_nodes = []
+        for _ in range(10):
+            initial_node = self.nsw.get_initial_search_node(points, layer_indices, edges)
+            initial_nodes.append(initial_node)
+
+        # All selected nodes should have high degrees
+        degrees = {node: len(edges[node]) for node in layer_indices}
+        max_degree = max(degrees.values())
+        
+        for node in set(initial_nodes):
+            node_degree = degrees[node]
+            # Should be at least 70% of max degree
+            self.assertGreaterEqual(
+                node_degree, max_degree * 0.7,
+                f"Selected node {node} has degree {node_degree}, max is {max_degree}"
+            )
+
+        print(f"✓ NSW degree analysis test passed: degrees={degrees}, selected nodes={set(initial_nodes)}")
+
 
 if __name__ == "__main__":
     unittest.main()

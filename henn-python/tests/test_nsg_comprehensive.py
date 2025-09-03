@@ -1,5 +1,5 @@
 """
-Comprehensive tests comparing NSG with KNN and NSW graph implementations.
+Comprehensive tests comparing all graph implementations.
 """
 
 import unittest
@@ -14,6 +14,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from pgraphs.knn import Knn
 from pgraphs.nsw import NSW
 from pgraphs.nsg import NSG
+from pgraphs.fanng import FANNG
+from pgraphs.kgraph import KGraph
 from henn import HENN, HENNConfig
 
 
@@ -31,23 +33,41 @@ class TestGraphComparison(unittest.TestCase):
         params_knn = {"k": 5}
         params_nsw = {"M": 5, "efConstruction": 50}
         params_nsg = {"R": 5, "L": 10, "C": 15}
+        params_fanng = {"K": 5, "L": 15, "R": 10, "alpha": 1.2}
+        params_kgraph = {"k": 5, "max_iterations": 10}
 
         knn = Knn()
         nsw = NSW()
         nsg = NSG()
+        fanng = FANNG()
+        kgraph = KGraph()
 
         # All should build graphs without errors
         edges_knn = knn.build_graph(self.points, self.layer_indices, params_knn)
         edges_nsw = nsw.build_graph(self.points, self.layer_indices, params_nsw)
         edges_nsg = nsg.build_graph(self.points, self.layer_indices, params_nsg)
+        edges_fanng = fanng.build_graph(self.points, self.layer_indices, params_fanng)
+        edges_kgraph = kgraph.build_graph(self.points, self.layer_indices, params_kgraph)
 
         # All should have same number of nodes
         self.assertEqual(len(edges_knn), 50)
         self.assertEqual(len(edges_nsw), 50)
         self.assertEqual(len(edges_nsg), 50)
+        self.assertEqual(len(edges_fanng), 50)
+        self.assertEqual(len(edges_kgraph), 50)
 
         # All should have reasonable connectivity
         knn_edges = sum(len(neighbors) for neighbors in edges_knn.values())
+        nsw_edges = sum(len(neighbors) for neighbors in edges_nsw.values())
+        nsg_edges = sum(len(neighbors) for neighbors in edges_nsg.values())
+        fanng_edges = sum(len(neighbors) for neighbors in edges_fanng.values())
+        kgraph_edges = sum(len(neighbors) for neighbors in edges_kgraph.values())
+
+        self.assertGreater(knn_edges, 0)
+        self.assertGreater(nsw_edges, 0)
+        self.assertGreater(nsg_edges, 0)
+        self.assertGreater(fanng_edges, 0)
+        self.assertGreater(kgraph_edges, 0)
         nsw_edges = sum(len(neighbors) for neighbors in edges_nsw.values())
         nsg_edges = sum(len(neighbors) for neighbors in edges_nsg.values())
 

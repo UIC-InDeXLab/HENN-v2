@@ -5,6 +5,8 @@ from pgraphs.base_pgraph import BaseProximityGraph
 from pgraphs.knn import Knn
 from pgraphs.nsw import NSW
 from pgraphs.nsg import NSG
+from pgraphs.fanng import FANNG
+from pgraphs.kgraph import KGraph
 import math
 import logging
 
@@ -14,7 +16,7 @@ class HENNConfig:
         self,
         epsnet_algorithm: str = "random",  # random, discrepancy, budget-aware
         epsnet_params: dict = None,
-        pgraph_algorithm: str = "NSW",  # nsw, knn, nsg
+        pgraph_algorithm: str = "NSW",  # nsw, knn, nsg, fanng, kgraph
         pgraph_params: dict = None,
         enable_logging: bool = False,
         log_level: str = "INFO",
@@ -45,6 +47,20 @@ class HENNConfig:
                 self.pgraph_params = {"R": 16, "L": 100, "C": 300}
             else:
                 self.pgraph_params = pgraph_params
+        elif pgraph_algorithm.lower() == "fanng":
+            self.pgraph_algorithm = FANNG()
+            # Provide default parameters for FANNG if none specified
+            if not pgraph_params:
+                self.pgraph_params = {"K": 16, "L": 32, "R": 16, "alpha": 1.2}
+            else:
+                self.pgraph_params = pgraph_params
+        elif pgraph_algorithm.lower() == "kgraph":
+            self.pgraph_algorithm = KGraph()
+            # Provide default parameters for KGraph if none specified
+            if not pgraph_params:
+                self.pgraph_params = {"k": 16, "rho": 1.0, "delta": 0.001, "max_iterations": 30}
+            else:
+                self.pgraph_params = pgraph_params
         else:
             # Default to NSW
             self.pgraph_algorithm = NSW()
@@ -60,6 +76,7 @@ class Layer:
         self.indices = None  # Indices of points in this layer
         self.edges = None  # Edges between points in this layer
         self.n = 0
+        self.pgraph = None  # Reference to the proximity graph used to build this layer
 
     def add_indices(self, indices: list):
         self.indices = indices
@@ -70,6 +87,9 @@ class Layer:
             self.edges = {}
             return
 
+        # Store reference to the proximity graph for later use in search
+        self.pgraph = pgraph
+        
         # Build graph using global indices - pgraph has access to all henn_points
         # and returns edges with global indices
         self.edges = pgraph.build_graph(henn_points, self.indices, params)
@@ -79,13 +99,19 @@ class Layer:
         if self.indices is None or self.edges is None or self.n == 0:
             return []
 
-        # Use global entry point directly, or pick random global index from this layer
+        # Use provided entry point if valid, otherwise use proximity graph's selection strategy
         if entry_point is not None and entry_point in self.indices:
             start_global_idx = entry_point
         else:
-            # Entry point not in this layer or None, use random from this layer
-            random_local_idx = np.random.randint(0, self.n)
-            start_global_idx = self.indices[random_local_idx]
+            # Use the proximity graph's initial node selection strategy
+            if self.pgraph is not None:
+                start_global_idx = self.pgraph.get_initial_search_node(
+                    self.henn_points, self.indices, self.edges
+                )
+            else:
+                # Fallback to random selection if no pgraph reference
+                random_local_idx = np.random.randint(0, self.n)
+                start_global_idx = self.indices[random_local_idx]
 
         visited = set()
         candidates = [
