@@ -2,20 +2,26 @@ from pgraphs.base_pgraph import BaseProximityGraph
 import numpy as np
 import random
 import heapq
+from tqdm import tqdm
 from typing import List, Tuple, Dict, Set
 
 
 class FANNG(BaseProximityGraph):
     """
     Fast Approximate Nearest Neighbor Graph (FANNG) implementation.
-    
+
     FANNG builds a sparse, navigable graph optimized for fast approximate
     nearest neighbor search. It uses incremental construction with candidate
     selection and pruning strategies to maintain graph quality.
     """
 
-    def __init__(self):
-        """Initialize FANNG graph."""
+    def __init__(
+        self,
+        distance: str = "l2",
+        enable_logging: bool = False,
+        log_level: str = "INFO",
+    ):
+        super().__init__(distance, enable_logging, log_level)
         self.init_node = None
 
     def build_graph(
@@ -23,7 +29,7 @@ class FANNG(BaseProximityGraph):
     ) -> Dict[int, List[int]]:
         """
         Build FANNG graph for the given points.
-        
+
         Args:
             henn_points: Array of points
             layer_indices: Indices of points in this layer
@@ -32,14 +38,14 @@ class FANNG(BaseProximityGraph):
                 - L: Candidate pool size during search (default: 32)
                 - R: Number of reverse links to consider (default: 16)
                 - alpha: Pruning parameter (default: 1.2)
-        
+
         Returns:
             Dictionary mapping node indices to neighbor lists
         """
         if params is None:
             params = {}
 
-        K = params.get("K", 8)  # Target degree
+        K = params.get("K", 16)  # Target degree
         L = params.get("L", 32)  # Search candidate pool size
         R = params.get("R", 16)  # Reverse link consideration
         alpha = params.get("alpha", 1.2)  # Pruning parameter
@@ -62,7 +68,9 @@ class FANNG(BaseProximityGraph):
         # Insert points incrementally
         inserted_nodes = []
 
-        for i, node_idx in enumerate(insertion_order):
+        for i, node_idx in tqdm(
+            enumerate(insertion_order), desc="Inserting nodes", total=n
+        ):
             if i == 0:
                 # First node has no neighbors
                 inserted_nodes.append(node_idx)
@@ -87,11 +95,11 @@ class FANNG(BaseProximityGraph):
                     graph[neighbor_idx].append(node_idx)
 
             # Prune neighbors that exceed degree limit
-            for neighbor_idx in selected_neighbors:
-                if len(graph[neighbor_idx]) > K:
-                    graph[neighbor_idx] = self._prune_neighbors(
-                        henn_points, neighbor_idx, graph[neighbor_idx], K, alpha
-                    )
+            # for neighbor_idx in selected_neighbors:
+            #     if len(graph[neighbor_idx]) > K:
+            #         graph[neighbor_idx] = self._prune_neighbors(
+            #             henn_points, neighbor_idx, graph[neighbor_idx], K, alpha
+            #         )
 
             # Update reverse links for existing nodes
             self._update_reverse_links(
@@ -115,7 +123,7 @@ class FANNG(BaseProximityGraph):
     ) -> List[Tuple[float, int]]:
         """
         Search for candidate neighbors using greedy search.
-        
+
         Returns list of (distance, node_idx) tuples.
         """
         if not inserted_nodes:
@@ -125,7 +133,7 @@ class FANNG(BaseProximityGraph):
 
         # Start with random node
         entry_point = random.choice(inserted_nodes)
-        
+
         # Dynamic candidate list (min-heap for closest candidates)
         candidates = []
         # Working set (max-heap for farthest candidates)
@@ -133,7 +141,10 @@ class FANNG(BaseProximityGraph):
         visited = set()
 
         # Initialize with entry point
-        entry_dist = np.linalg.norm(henn_points[entry_point] - query_point)
+        if self.distance == "cosine":
+            entry_dist = 1 - np.dot(henn_points[entry_point], query_point)
+        else:  # Default to L2 distance
+            entry_dist = np.linalg.norm(henn_points[entry_point] - query_point)
         heapq.heappush(candidates, (entry_dist, entry_point))
         heapq.heappush(working_set, (-entry_dist, entry_point))
         visited.add(entry_point)
@@ -150,9 +161,14 @@ class FANNG(BaseProximityGraph):
                 if neighbor_idx not in visited and neighbor_idx != query_idx:
                     visited.add(neighbor_idx)
 
-                    neighbor_dist = np.linalg.norm(
-                        henn_points[neighbor_idx] - query_point
-                    )
+                    if self.distance == "cosine":
+                        neighbor_dist = 1 - np.dot(
+                            henn_points[neighbor_idx], query_point
+                        )
+                    else:  # Default to L2 distance
+                        neighbor_dist = np.linalg.norm(
+                            henn_points[neighbor_idx] - query_point
+                        )
 
                     # Add to candidates for exploration
                     heapq.heappush(candidates, (neighbor_dist, neighbor_idx))
@@ -178,7 +194,7 @@ class FANNG(BaseProximityGraph):
     ) -> List[int]:
         """
         Select neighbors using FANNG's diversity-based selection.
-        
+
         This implements a greedy algorithm that selects neighbors to maximize
         diversity while maintaining proximity.
         """
@@ -202,10 +218,13 @@ class FANNG(BaseProximityGraph):
                 max_similarity = 0.0
                 for selected_idx in selected:
                     selected_point = henn_points[selected_idx]
-                    
+
                     # Distance from candidate to selected neighbor
-                    cand_to_sel = np.linalg.norm(candidate_point - selected_point)
-                    
+                    if self.distance == "cosine":
+                        cand_to_sel = 1 - np.dot(candidate_point, selected_point)
+                    else:  # Default to L2 distance
+                        cand_to_sel = np.linalg.norm(candidate_point - selected_point)
+
                     # Similarity score (lower distance = higher similarity)
                     if cand_to_sel > 0:
                         similarity = dist_to_node / cand_to_sel
@@ -225,34 +244,34 @@ class FANNG(BaseProximityGraph):
 
         return selected
 
-    def _prune_neighbors(
-        self,
-        henn_points: np.ndarray,
-        node_idx: int,
-        neighbors: List[int],
-        K: int,
-        alpha: float,
-    ) -> List[int]:
-        """
-        Prune neighbors to maintain degree limit while preserving quality.
-        """
-        if len(neighbors) <= K:
-            return neighbors
+    # def _prune_neighbors(
+    #     self,
+    #     henn_points: np.ndarray,
+    #     node_idx: int,
+    #     neighbors: List[int],
+    #     K: int,
+    #     alpha: float,
+    # ) -> List[int]:
+    #     """
+    #     Prune neighbors to maintain degree limit while preserving quality.
+    #     """
+    #     if len(neighbors) <= K:
+    #         return neighbors
 
-        node_point = henn_points[node_idx]
+    #     node_point = henn_points[node_idx]
 
-        # Calculate distances to all neighbors
-        neighbor_distances = []
-        for neighbor_idx in neighbors:
-            dist = np.linalg.norm(henn_points[neighbor_idx] - node_point)
-            neighbor_distances.append((dist, neighbor_idx))
+    #     # Calculate distances to all neighbors
+    #     neighbor_distances = []
+    #     for neighbor_idx in neighbors:
+    #         dist = np.linalg.norm(henn_points[neighbor_idx] - node_point)
+    #         neighbor_distances.append((dist, neighbor_idx))
 
-        # Use same selection strategy as neighbor selection
-        selected = self._select_neighbors_fanng(
-            henn_points, node_idx, neighbor_distances, K, alpha
-        )
+    #     # Use same selection strategy as neighbor selection
+    #     selected = self._select_neighbors_fanng(
+    #         henn_points, node_idx, neighbor_distances, K, alpha
+    #     )
 
-        return selected
+    #     return selected
 
     def _update_reverse_links(
         self,
@@ -273,7 +292,10 @@ class FANNG(BaseProximityGraph):
         distances = []
         for node_idx in inserted_nodes:
             if node_idx != new_node_idx:
-                dist = np.linalg.norm(henn_points[node_idx] - new_point)
+                if self.distance == "cosine":
+                    dist = 1 - np.dot(henn_points[node_idx], new_point)
+                else:  # Default to L2 distance
+                    dist = np.linalg.norm(henn_points[node_idx] - new_point)
                 distances.append((dist, node_idx))
 
         distances.sort()
@@ -282,7 +304,7 @@ class FANNG(BaseProximityGraph):
         # For each close node, consider adding new_node as neighbor
         for dist, node_idx in close_nodes:
             current_neighbors = graph[node_idx].copy()
-            
+
             # Add new node as candidate
             if new_node_idx not in current_neighbors:
                 current_neighbors.append(new_node_idx)
@@ -293,9 +315,14 @@ class FANNG(BaseProximityGraph):
                     neighbor_distances = []
                     node_point = henn_points[node_idx]
                     for neighbor_idx in current_neighbors:
-                        neighbor_dist = np.linalg.norm(
-                            henn_points[neighbor_idx] - node_point
-                        )
+                        if self.distance == "cosine":
+                            neighbor_dist = 1 - np.dot(
+                                henn_points[neighbor_idx], node_point
+                            )
+                        else:  # Default to L2 distance
+                            neighbor_dist = np.linalg.norm(
+                                henn_points[neighbor_idx] - node_point
+                            )
                         neighbor_distances.append((neighbor_dist, neighbor_idx))
 
                     # Select best neighbors
@@ -326,13 +353,13 @@ class FANNG(BaseProximityGraph):
     ) -> int:
         """
         Get the initial search node for this layer.
-        
+
         Returns the entry point found during graph construction,
         or the highest degree node if edges are provided.
         """
         # Use stored entry point
         if self.init_node is not None and self.init_node in layer_indices:
             return self.init_node
-        
+
         # Fallback to first node
         return layer_indices[0] if layer_indices else None

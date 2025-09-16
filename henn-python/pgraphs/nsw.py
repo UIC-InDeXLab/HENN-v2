@@ -2,15 +2,25 @@ from pgraphs.base_pgraph import BaseProximityGraph
 import numpy as np
 import random
 import heapq
+from tqdm import tqdm
 
 
 class NSW(BaseProximityGraph):
-    def __init__(self):
+    def __init__(
+        self,
+        distance: str = "l2",
+        enable_logging: bool = False,
+        log_level: str = "INFO",
+    ):
+        super().__init__(distance, enable_logging, log_level)
         """Initialize NSW graph."""
         self.init_node = None
 
     def build_graph(
-        self, henn_points: np.ndarray, layer_indices: list, params: dict = None
+        self,
+        henn_points: np.ndarray,
+        layer_indices: list,
+        params: dict = None,
     ):
         """
         Build a NSW (Navigable Small World) graph for the specified layer.
@@ -51,7 +61,7 @@ class NSW(BaseProximityGraph):
         inserted_indices = [layer_indices[0]]
 
         # Insert remaining points incrementally
-        for i in range(1, n):
+        for i in tqdm(range(1, n), desc="Building NSW layer"):
             current_idx = layer_indices[i]
             current_point = henn_points[current_idx]
 
@@ -71,8 +81,8 @@ class NSW(BaseProximityGraph):
                 edges[neighbor_idx].append(current_idx)
 
                 # Prune connections of neighbor if it exceeds max connections
-                if len(edges[neighbor_idx]) > M:
-                    self._prune_connections(henn_points, neighbor_idx, M, edges)
+                # if len(edges[neighbor_idx]) > M:
+                # self._prune_connections(henn_points, neighbor_idx, M, edges)
 
             # Add current point to inserted set
             inserted_indices.append(current_idx)
@@ -114,7 +124,11 @@ class NSW(BaseProximityGraph):
         w = []  # Max heap for dynamic candidates (best ef found so far)
 
         # Calculate distance to entry point
-        entry_dist = np.linalg.norm(henn_points[entry_point] - query_point)
+        if self.distance == "cosine":
+            norm_query_point = query_point / np.linalg.norm(query_point)
+            entry_dist = 1 - np.dot(henn_points[entry_point], norm_query_point)
+        else:  # Default to L2 distance
+            entry_dist = np.linalg.norm(henn_points[entry_point] - query_point)
 
         # Add entry point to candidates and w
         heapq.heappush(candidates, (entry_dist, entry_point))
@@ -133,9 +147,14 @@ class NSW(BaseProximityGraph):
                 if neighbor_idx not in visited and neighbor_idx in layer_points:
                     visited.add(neighbor_idx)
 
-                    neighbor_dist = np.linalg.norm(
-                        henn_points[neighbor_idx] - query_point
-                    )
+                    if self.distance == "cosine":
+                        neighbor_dist = 1 - np.dot(
+                            henn_points[neighbor_idx], query_point
+                        )
+                    else:  # Default to L2 distance
+                        neighbor_dist = np.linalg.norm(
+                            henn_points[neighbor_idx] - query_point
+                        )
 
                     # Add to candidates for exploration
                     heapq.heappush(candidates, (neighbor_dist, neighbor_idx))
@@ -166,43 +185,43 @@ class NSW(BaseProximityGraph):
         candidates.sort(key=lambda x: x[0])
         return [idx for _, idx in candidates[:M]]
 
-    def _prune_connections(
-        self, henn_points: np.ndarray, node_idx: int, M: int, edges: dict
-    ):
-        """
-        Prune connections of a node to maintain degree constraint.
-        Uses simple distance-based pruning to keep M closest neighbors.
+    # def _prune_connections(
+    #     self, henn_points: np.ndarray, node_idx: int, M: int, edges: dict
+    # ):
+    #     """
+    #     Prune connections of a node to maintain degree constraint.
+    #     Uses simple distance-based pruning to keep M closest neighbors.
 
-        Args:
-            henn_points: All points in the HENN structure
-            node_idx: Index of the node to prune
-            M: Maximum allowed degree
-            edges: Current adjacency list (modified in-place)
-        """
-        if len(edges[node_idx]) <= M:
-            return
+    #     Args:
+    #         henn_points: All points in the HENN structure
+    #         node_idx: Index of the node to prune
+    #         M: Maximum allowed degree
+    #         edges: Current adjacency list (modified in-place)
+    #     """
+    #     if len(edges[node_idx]) <= M:
+    #         return
 
-        node_point = henn_points[node_idx]
+    #     node_point = henn_points[node_idx]
 
-        # Calculate distances to all current neighbors
-        neighbor_distances = []
-        for neighbor_idx in edges[node_idx]:
-            dist = np.linalg.norm(henn_points[neighbor_idx] - node_point)
-            neighbor_distances.append((dist, neighbor_idx))
+    #     # Calculate distances to all current neighbors
+    #     neighbor_distances = []
+    #     for neighbor_idx in edges[node_idx]:
+    #         dist = np.linalg.norm(henn_points[neighbor_idx] - node_point)
+    #         neighbor_distances.append((dist, neighbor_idx))
 
-        # Sort by distance and keep only M closest
-        neighbor_distances.sort()
-        closest_neighbors = [idx for _, idx in neighbor_distances[:M]]
+    #     # Sort by distance and keep only M closest
+    #     neighbor_distances.sort()
+    #     closest_neighbors = [idx for _, idx in neighbor_distances[:M]]
 
-        # Remove connections to pruned neighbors (bidirectional)
-        for neighbor_idx in edges[node_idx]:
-            if neighbor_idx not in closest_neighbors:
-                # Remove bidirectional connection
-                if node_idx in edges[neighbor_idx]:
-                    edges[neighbor_idx].remove(node_idx)
+    #     # Remove connections to pruned neighbors (bidirectional)
+    #     for neighbor_idx in edges[node_idx]:
+    #         if neighbor_idx not in closest_neighbors:
+    #             # Remove bidirectional connection
+    #             if node_idx in edges[neighbor_idx]:
+    #                 edges[neighbor_idx].remove(node_idx)
 
-        # Update the node's adjacency list
-        edges[node_idx] = closest_neighbors
+    #     # Update the node's adjacency list
+    #     edges[node_idx] = closest_neighbors
 
     def _find_highest_degree(self, edges, layer_indices):
         # Find node with highest degree

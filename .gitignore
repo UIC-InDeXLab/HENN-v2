@@ -102,3 +102,5 @@ venv.bak/
 # OS files
 .DS_Store
 Thumbs.db
+
+henn-python/datasets/ann_datasets

@@ -20,76 +20,94 @@ class HENNConfig:
         pgraph_params: dict = None,
         enable_logging: bool = False,
         log_level: str = "INFO",
+        distance: str = "l2",  # 'l2' or 'cosine'
     ):
         # TODO: build an instance of base_epsnet
         self.epsnet_algorithm = RandomSample()
         self.epsnet_params = epsnet_params or {}
-        
+        self.distance = distance
+
         # Build an instance of base_pgraph based on algorithm choice
         if pgraph_algorithm.lower() == "knn":
-            self.pgraph_algorithm = Knn()
+            self.pgraph_algorithm = Knn(distance=distance)
             # Provide default parameters for KNN if none specified
             if not pgraph_params:
                 self.pgraph_params = {"k": 16}
             else:
                 self.pgraph_params = pgraph_params
         elif pgraph_algorithm.lower() == "nsw":
-            self.pgraph_algorithm = NSW()
+            self.pgraph_algorithm = NSW(distance=distance)
             # Provide default parameters for NSW if none specified
             if not pgraph_params:
                 self.pgraph_params = {"M": 16, "efConstruction": 200}
             else:
                 self.pgraph_params = pgraph_params
         elif pgraph_algorithm.lower() == "nsg":
-            self.pgraph_algorithm = NSG()
+            self.pgraph_algorithm = NSG(distance=distance)
             # Provide default parameters for NSG if none specified
             if not pgraph_params:
                 self.pgraph_params = {"R": 16, "L": 100, "C": 300}
             else:
                 self.pgraph_params = pgraph_params
         elif pgraph_algorithm.lower() == "fanng":
-            self.pgraph_algorithm = FANNG()
+            self.pgraph_algorithm = FANNG(distance=distance)
             # Provide default parameters for FANNG if none specified
             if not pgraph_params:
                 self.pgraph_params = {"K": 16, "L": 32, "R": 16, "alpha": 1.2}
             else:
                 self.pgraph_params = pgraph_params
         elif pgraph_algorithm.lower() == "kgraph":
-            self.pgraph_algorithm = KGraph()
+            self.pgraph_algorithm = KGraph(distance=distance)
             # Provide default parameters for KGraph if none specified
             if not pgraph_params:
-                self.pgraph_params = {"k": 16, "rho": 1.0, "delta": 0.001, "max_iterations": 30}
+                self.pgraph_params = {
+                    "k": 16,
+                    "rho": 0.5,
+                    "delta": 0.001,
+                    "max_iterations": 10,
+                }
             else:
                 self.pgraph_params = pgraph_params
         else:
             # Default to NSW
             self.pgraph_algorithm = NSW()
             self.pgraph_params = pgraph_params or {"M": 16, "efConstruction": 200}
-            
+
         self.enable_logging = enable_logging
         self.log_level = log_level
 
 
 class Layer:
-    def __init__(self, henn_points: np.ndarray):
+    def __init__(self, henn_points: np.ndarray, distance: str = "l2"):
         self.henn_points = henn_points  # Reference to all HENN points
         self.indices = None  # Indices of points in this layer
         self.edges = None  # Edges between points in this layer
         self.n = 0
         self.pgraph = None  # Reference to the proximity graph used to build this layer
+        self.dist_str = distance  # 'l2' or 'cosine'
+
+    def distance(self, a: np.ndarray, b: np.ndarray) -> float:
+        if self.dist_str == "l2":
+            return np.linalg.norm(a - b)
+        elif self.dist_str == "cosine":
+            return 1 - np.dot(a, b)
+        else:
+            raise ValueError(f"Unsupported distance metric: {self.dist_str}")
 
     def add_indices(self, indices: list):
         self.indices = indices
         self.n = len(indices)
 
-    def build_graph(self, pgraph: BaseProximityGraph, henn_points: np.ndarray, params: dict = None):
+    def build_graph(
+        self, pgraph: BaseProximityGraph, henn_points: np.ndarray, params: dict = None
+    ):
         if self.indices is None or self.n == 0:
             self.edges = {}
             return
 
         # Store reference to the proximity graph for later use in search
         self.pgraph = pgraph
-        
+
         # Build graph using global indices - pgraph has access to all henn_points
         # and returns edges with global indices
         self.edges = pgraph.build_graph(henn_points, self.indices, params)
@@ -116,7 +134,8 @@ class Layer:
         visited = set()
         candidates = [
             (
-                np.linalg.norm(self.henn_points[start_global_idx] - query_point),
+                # np.linalg.norm(self.henn_points[start_global_idx] - query_point),
+                self.distance(self.henn_points[start_global_idx], query_point),
                 start_global_idx,
             )
         ]
@@ -152,9 +171,12 @@ class Layer:
                         neighbor_global_idx in self.indices
                         and neighbor_global_idx not in visited
                     ):
-                        neighbor_dist = np.linalg.norm(
-                            self.henn_points[neighbor_global_idx] - query_point
+                        neighbor_dist = self.distance(
+                            self.henn_points[neighbor_global_idx], query_point
                         )
+                        # neighbor_dist = np.linalg.norm(
+                        # self.henn_points[neighbor_global_idx] - query_point
+                        # )
                         candidates.append((neighbor_dist, neighbor_global_idx))
 
         # Return global indices of k nearest neighbors
@@ -176,7 +198,7 @@ class HENN:
         # Use default config if none provided
         if config is None:
             config = HENNConfig()
-        
+
         self.config = config
         self.epsnet = config.epsnet_algorithm
         self.pgraph = config.pgraph_algorithm

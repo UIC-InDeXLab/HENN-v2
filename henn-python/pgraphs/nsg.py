@@ -2,6 +2,7 @@ from pgraphs.base_pgraph import BaseProximityGraph
 import numpy as np
 import random
 from typing import List, Tuple, Dict, Set
+from tqdm import tqdm
 
 
 class NSG(BaseProximityGraph):
@@ -15,8 +16,13 @@ class NSG(BaseProximityGraph):
     3. Ensure strong connectivity through pruning and reconnection
     """
 
-    def __init__(self):
-        """Initialize NSG graph."""
+    def __init__(
+        self,
+        distance: str = "l2",
+        enable_logging: bool = False,
+        log_level: str = "INFO",
+    ):
+        super().__init__(distance, enable_logging, log_level)
         self.init_node = None
 
     def build_graph(
@@ -39,7 +45,7 @@ class NSG(BaseProximityGraph):
             params = {}
 
         # Default parameters
-        R = params.get("R", 32)  # Maximum out-degree
+        R = params.get("R", 16)  # Maximum out-degree
         L = params.get("L", 100)  # Search list size during construction
         C = params.get("C", 500)  # Maximum candidates for neighbor selection
 
@@ -51,21 +57,22 @@ class NSG(BaseProximityGraph):
         if n == 1:
             return {layer_indices[0]: []}
 
-        # Initialize adjacency list
-        edges = {idx: [] for idx in layer_indices}
-
         # Step 1: Find navigation node (medoid)
+        print("Finding medoid for navigation node...")
         navigation_node = self._find_medoid(henn_points, layer_indices)
 
         # Step 2: Build initial graph using k-NN
+        print("Building initial k-NN graph...")
         initial_graph = self._build_initial_knn_graph(henn_points, layer_indices, R)
 
         # Step 3: Build NSG by iteratively improving connections
+        print("Building NSG from initial k-NN graph...")
         nsg_graph = self._build_nsg_from_knn(
             henn_points, layer_indices, initial_graph, navigation_node, R, L, C
         )
 
         # Step 4: Ensure connectivity
+        print("Ensuring graph connectivity...")
         final_graph = self._ensure_connectivity(
             henn_points, layer_indices, nsg_graph, navigation_node
         )
@@ -117,14 +124,19 @@ class NSG(BaseProximityGraph):
         medoid_idx = layer_indices[0]
 
         # Calculate sum of distances for each point to all other points
-        for i, idx_i in enumerate(layer_indices):
+        for i, idx_i in tqdm(
+            enumerate(layer_indices), desc="Finding medoid", total=len(layer_indices)
+        ):
             sum_dist = 0.0
             point_i = henn_points[idx_i]
 
             for j, idx_j in enumerate(layer_indices):
                 if i != j:
                     point_j = henn_points[idx_j]
-                    dist = np.linalg.norm(point_i - point_j)
+                    if self.distance == "cosine":
+                        dist = 1 - np.dot(point_i, point_j)
+                    else:
+                        dist = np.linalg.norm(point_i - point_j)
                     sum_dist += dist
 
             if sum_dist < min_sum_dist:
@@ -149,7 +161,11 @@ class NSG(BaseProximityGraph):
         """
         knn_graph = {idx: [] for idx in layer_indices}
 
-        for i, idx_i in enumerate(layer_indices):
+        for i, idx_i in tqdm(
+            enumerate(layer_indices),
+            desc="Building initial k-NN graph",
+            total=len(layer_indices),
+        ):
             point_i = henn_points[idx_i]
 
             # Calculate distances to all other points
@@ -157,7 +173,10 @@ class NSG(BaseProximityGraph):
             for j, idx_j in enumerate(layer_indices):
                 if i != j:
                     point_j = henn_points[idx_j]
-                    dist = np.linalg.norm(point_i - point_j)
+                    if self.distance == "cosine":
+                        dist = 1 - np.dot(point_i, point_j)
+                    else:
+                        dist = np.linalg.norm(point_i - point_j)
                     distances.append((dist, idx_j))
 
             # Sort by distance and take k nearest
@@ -199,7 +218,7 @@ class NSG(BaseProximityGraph):
         ]
         random.shuffle(processing_order[1:])  # Keep navigation node first
 
-        for node_idx in processing_order:
+        for node_idx in tqdm(processing_order, desc="Building NSG"):
             # Find candidate neighbors using beam search
             candidates = self._beam_search_candidates(
                 henn_points, layer_indices, node_idx, nsg_graph, navigation_node, L, C
@@ -245,7 +264,10 @@ class NSG(BaseProximityGraph):
         candidates = []
 
         # Start from navigation node
-        start_dist = np.linalg.norm(henn_points[navigation_node] - query_point)
+        if self.distance == "cosine":
+            start_dist = 1 - np.dot(henn_points[navigation_node], query_point)
+        else:
+            start_dist = np.linalg.norm(henn_points[navigation_node] - query_point)
         candidates.append((start_dist, navigation_node))
 
         dynamic_candidates = []
@@ -276,9 +298,14 @@ class NSG(BaseProximityGraph):
             if should_explore and current_idx in current_graph:
                 for neighbor_idx in current_graph[current_idx]:
                     if neighbor_idx not in visited and neighbor_idx != query_idx:
-                        neighbor_dist = np.linalg.norm(
-                            henn_points[neighbor_idx] - query_point
-                        )
+                        if self.distance == "cosine":
+                            neighbor_dist = 1 - np.dot(
+                                henn_points[neighbor_idx], query_point
+                            )
+                        else:
+                            neighbor_dist = np.linalg.norm(
+                                henn_points[neighbor_idx] - query_point
+                            )
                         candidates.append((neighbor_dist, neighbor_idx))
 
         # Return top C candidates
@@ -311,7 +338,10 @@ class NSG(BaseProximityGraph):
         # Calculate distances from node to all candidates
         candidate_distances = []
         for cand_idx in candidates:
-            dist = np.linalg.norm(henn_points[cand_idx] - node_point)
+            if self.distance == "cosine":
+                dist = 1 - np.dot(henn_points[cand_idx], node_point)
+            else:
+                dist = np.linalg.norm(henn_points[cand_idx] - node_point)
             candidate_distances.append((dist, cand_idx))
 
         candidate_distances.sort()
@@ -326,9 +356,14 @@ class NSG(BaseProximityGraph):
             for sel_idx in selected:
                 # If distance from candidate to selected neighbor is much smaller
                 # than distance from node to candidate, skip this candidate
-                cand_to_sel_dist = np.linalg.norm(
-                    henn_points[cand_idx] - henn_points[sel_idx]
-                )
+                if self.distance == "cosine":
+                    cand_to_sel_dist = 1 - np.dot(
+                        henn_points[cand_idx], henn_points[sel_idx]
+                    )
+                else:
+                    cand_to_sel_dist = np.linalg.norm(
+                        henn_points[cand_idx] - henn_points[sel_idx]
+                    )
                 if cand_to_sel_dist < dist:
                     should_select = False
                     break
@@ -369,6 +404,7 @@ class NSG(BaseProximityGraph):
         reachable = set()
         stack = [navigation_node]
 
+        print("Checking graph connectivity...")
         while stack:
             current = stack.pop()
             if current in reachable:
@@ -382,7 +418,7 @@ class NSG(BaseProximityGraph):
         # For unreachable nodes, add connection to closest reachable node
         unreachable = set(layer_indices) - reachable
 
-        for unreachable_idx in unreachable:
+        for unreachable_idx in tqdm(unreachable, desc="Ensuring connectivity"):
             unreachable_point = henn_points[unreachable_idx]
 
             # Find closest reachable node
@@ -390,7 +426,12 @@ class NSG(BaseProximityGraph):
             closest_reachable = None
 
             for reachable_idx in reachable:
-                dist = np.linalg.norm(henn_points[reachable_idx] - unreachable_point)
+                if self.distance == "cosine":
+                    dist = 1 - np.dot(henn_points[reachable_idx], unreachable_point)
+                else:
+                    dist = np.linalg.norm(
+                        henn_points[reachable_idx] - unreachable_point
+                    )
                 if dist < min_dist:
                     min_dist = dist
                     closest_reachable = reachable_idx
