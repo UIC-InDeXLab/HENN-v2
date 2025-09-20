@@ -4,6 +4,106 @@ import random
 import heapq
 from tqdm import tqdm
 from typing import List, Tuple, Dict, Set
+from numba import jit, prange
+import numba
+
+
+@jit(nopython=True, fastmath=True)
+def compute_l2_distances_batch(query_point, points, indices):
+    """Vectorized L2 distance computation."""
+    n = len(indices)
+    distances = np.empty(n, dtype=np.float32)
+    for i in prange(n):
+        idx = indices[i]
+        diff = points[idx] - query_point
+        distances[i] = np.sqrt(np.sum(diff * diff))
+    return distances
+
+
+@jit(nopython=True, fastmath=True)
+def compute_cosine_distances_batch(query_point, points, indices):
+    """Vectorized cosine distance computation."""
+    n = len(indices)
+    distances = np.empty(n, dtype=np.float32)
+    query_norm = np.sqrt(np.sum(query_point * query_point))
+
+    for i in prange(n):
+        idx = indices[i]
+        point = points[idx]
+        dot_product = np.sum(query_point * point)
+        point_norm = np.sqrt(np.sum(point * point))
+
+        if query_norm > 0 and point_norm > 0:
+            cosine_sim = dot_product / (query_norm * point_norm)
+            distances[i] = 1.0 - cosine_sim
+        else:
+            distances[i] = 1.0
+    return distances
+
+
+@jit(nopython=True, fastmath=True)
+def fast_neighbor_selection(
+    distances, candidate_indices, points, node_point, K, alpha, distance_type
+):
+    """Optimized neighbor selection with diversity."""
+    n_candidates = len(candidate_indices)
+    if n_candidates <= K:
+        return candidate_indices[:n_candidates]
+
+    selected = np.empty(K, dtype=np.int32)
+    selected_count = 0
+    used = np.zeros(n_candidates, dtype=np.bool_)
+
+    # Pre-compute all pairwise distances for candidates
+    candidate_points = np.empty((n_candidates, points.shape[1]), dtype=np.float32)
+    for i in range(n_candidates):
+        candidate_points[i] = points[candidate_indices[i]]
+
+    while selected_count < K:
+        best_idx = -1
+        best_score = np.inf
+
+        for i in range(n_candidates):
+            if used[i]:
+                continue
+
+            dist_to_node = distances[i]
+            max_similarity = 0.0
+
+            # Calculate diversity score against selected neighbors
+            for j in range(selected_count):
+                selected_point = points[selected[j]]
+
+                if distance_type == 0:  # L2
+                    diff = candidate_points[i] - selected_point
+                    cand_to_sel = np.sqrt(np.sum(diff * diff))
+                else:  # cosine
+                    dot_prod = np.sum(candidate_points[i] * selected_point)
+                    norm1 = np.sqrt(np.sum(candidate_points[i] * candidate_points[i]))
+                    norm2 = np.sqrt(np.sum(selected_point * selected_point))
+                    if norm1 > 0 and norm2 > 0:
+                        cand_to_sel = 1.0 - (dot_prod / (norm1 * norm2))
+                    else:
+                        cand_to_sel = 1.0
+
+                if cand_to_sel > 0:
+                    similarity = dist_to_node / cand_to_sel
+                    max_similarity = max(max_similarity, similarity)
+
+            score = dist_to_node + alpha * max_similarity
+
+            if score < best_score:
+                best_score = score
+                best_idx = i
+
+        if best_idx >= 0:
+            selected[selected_count] = candidate_indices[best_idx]
+            used[best_idx] = True
+            selected_count += 1
+        else:
+            break
+
+    return selected[:selected_count]
 
 
 class FANNG(BaseProximityGraph):
@@ -23,18 +123,19 @@ class FANNG(BaseProximityGraph):
     ):
         super().__init__(distance, enable_logging, log_level)
         self.init_node = None
+        self.distance_type = 0 if distance == "l2" else 1  # 0 for L2, 1 for cosine
 
     def build_graph(
         self, henn_points: np.ndarray, layer_indices: list, params: dict = None
     ) -> Dict[int, List[int]]:
         """
-        Build FANNG graph for the given points.
+        Build FANNG graph for the given points with optimizations.
 
         Args:
             henn_points: Array of points
             layer_indices: Indices of points in this layer
             params: Parameters for FANNG construction:
-                - K: Number of neighbors per node (default: 8)
+                - K: Number of neighbors per node (default: 16)
                 - L: Candidate pool size during search (default: 32)
                 - R: Number of reverse links to consider (default: 16)
                 - alpha: Pruning parameter (default: 1.2)
@@ -58,6 +159,10 @@ class FANNG(BaseProximityGraph):
         if n == 1:
             return {layer_indices[0]: []}
 
+        # Convert to numpy arrays for faster access
+        henn_points = np.asarray(henn_points, dtype=np.float32)
+        layer_indices_array = np.array(layer_indices, dtype=np.int32)
+
         # Initialize adjacency list
         graph = {idx: [] for idx in layer_indices}
 
@@ -65,8 +170,13 @@ class FANNG(BaseProximityGraph):
         insertion_order = layer_indices.copy()
         random.shuffle(insertion_order)
 
-        # Insert points incrementally
+        # Insert points incrementally with optimizations
         inserted_nodes = []
+
+        # Pre-allocate arrays for efficiency
+        max_candidates = min(L * 2, n)
+        candidate_buffer = np.empty(max_candidates, dtype=np.int32)
+        distance_buffer = np.empty(max_candidates, dtype=np.float32)
 
         for i, node_idx in tqdm(
             enumerate(insertion_order), desc="Inserting nodes", total=n
@@ -76,35 +186,33 @@ class FANNG(BaseProximityGraph):
                 inserted_nodes.append(node_idx)
                 continue
 
-            # Find candidate neighbors using search
-            candidates = self._search_candidates(
-                henn_points, node_idx, inserted_nodes, graph, L
+            # Find candidate neighbors using optimized search
+            candidates = self._search_candidates_optimized(
+                henn_points,
+                node_idx,
+                inserted_nodes,
+                graph,
+                L,
+                candidate_buffer,
+                distance_buffer,
             )
 
-            # Select best neighbors using FANNG selection strategy
-            selected_neighbors = self._select_neighbors_fanng(
+            # Select best neighbors using optimized FANNG selection
+            selected_neighbors = self._select_neighbors_optimized(
                 henn_points, node_idx, candidates, K, alpha
             )
 
             # Add forward links
-            graph[node_idx] = selected_neighbors
+            graph[node_idx] = selected_neighbors.tolist()
 
-            # Add reverse links (bidirectional connections)
-            for neighbor_idx in selected_neighbors:
-                if node_idx not in graph[neighbor_idx]:
-                    graph[neighbor_idx].append(node_idx)
+            # Add reverse links with batch updates
+            self._add_reverse_links_batch(graph, node_idx, selected_neighbors)
 
-            # Prune neighbors that exceed degree limit
-            # for neighbor_idx in selected_neighbors:
-            #     if len(graph[neighbor_idx]) > K:
-            #         graph[neighbor_idx] = self._prune_neighbors(
-            #             henn_points, neighbor_idx, graph[neighbor_idx], K, alpha
-            #         )
-
-            # Update reverse links for existing nodes
-            self._update_reverse_links(
-                henn_points, node_idx, inserted_nodes, graph, R, K, alpha
-            )
+            # Update reverse links for existing nodes (less frequently)
+            if i % 10 == 0 or len(selected_neighbors) > K // 2:  # Adaptive frequency
+                self._update_reverse_links_optimized(
+                    henn_points, node_idx, inserted_nodes, graph, R, K, alpha
+                )
 
             inserted_nodes.append(node_idx)
 
@@ -113,65 +221,77 @@ class FANNG(BaseProximityGraph):
 
         return graph
 
-    def _search_candidates(
+    def _search_candidates_optimized(
         self,
         henn_points: np.ndarray,
         query_idx: int,
         inserted_nodes: List[int],
         graph: Dict[int, List[int]],
         L: int,
-    ) -> List[Tuple[float, int]]:
+        candidate_buffer: np.ndarray,
+        distance_buffer: np.ndarray,
+    ) -> np.ndarray:
         """
-        Search for candidate neighbors using greedy search.
-
-        Returns list of (distance, node_idx) tuples.
+        Optimized candidate search using vectorized distance computation.
         """
         if not inserted_nodes:
-            return []
+            return np.array([], dtype=np.int32)
 
         query_point = henn_points[query_idx]
 
-        # Start with random node
-        entry_point = random.choice(inserted_nodes)
+        # Start with multiple entry points for better coverage
+        n_entries = min(3, len(inserted_nodes))
+        entry_points = random.sample(inserted_nodes, n_entries)
 
-        # Dynamic candidate list (min-heap for closest candidates)
-        candidates = []
-        # Working set (max-heap for farthest candidates)
-        working_set = []
+        # Use set for faster membership testing
         visited = set()
+        candidates_heap = []  # min-heap for exploration
+        working_set = []  # max-heap for results
 
-        # Initialize with entry point
-        if self.distance == "cosine":
-            entry_dist = 1 - np.dot(henn_points[entry_point], query_point)
-        else:  # Default to L2 distance
-            entry_dist = np.linalg.norm(henn_points[entry_point] - query_point)
-        heapq.heappush(candidates, (entry_dist, entry_point))
-        heapq.heappush(working_set, (-entry_dist, entry_point))
-        visited.add(entry_point)
+        # Initialize with entry points
+        for entry_point in entry_points:
+            if entry_point not in visited:
+                if self.distance_type == 0:  # L2
+                    dist = np.linalg.norm(henn_points[entry_point] - query_point)
+                else:  # cosine
+                    dist = 1 - np.dot(henn_points[entry_point], query_point)
 
-        while candidates:
-            current_dist, current_idx = heapq.heappop(candidates)
+                heapq.heappush(candidates_heap, (dist, entry_point))
+                heapq.heappush(working_set, (-dist, entry_point))
+                visited.add(entry_point)
 
-            # If current candidate is farther than farthest in working set, stop
-            if working_set and current_dist > -working_set[0][0]:
+        # Greedy search with early termination
+        iterations = 0
+        max_iterations = min(len(inserted_nodes) * 2, 1000)  # Limit iterations
+
+        while candidates_heap and iterations < max_iterations:
+            current_dist, current_idx = heapq.heappop(candidates_heap)
+            iterations += 1
+
+            # Early termination condition
+            if working_set and current_dist > -working_set[0][0] * 1.5:
                 break
 
             # Explore neighbors
-            for neighbor_idx in graph.get(current_idx, []):
+            neighbors = graph.get(current_idx, [])
+            if len(neighbors) > 20:  # Limit neighbor exploration for high-degree nodes
+                neighbors = random.sample(neighbors, 20)
+
+            for neighbor_idx in neighbors:
                 if neighbor_idx not in visited and neighbor_idx != query_idx:
                     visited.add(neighbor_idx)
 
-                    if self.distance == "cosine":
-                        neighbor_dist = 1 - np.dot(
-                            henn_points[neighbor_idx], query_point
-                        )
-                    else:  # Default to L2 distance
+                    if self.distance_type == 0:  # L2
                         neighbor_dist = np.linalg.norm(
                             henn_points[neighbor_idx] - query_point
                         )
+                    else:  # cosine
+                        neighbor_dist = 1 - np.dot(
+                            henn_points[neighbor_idx], query_point
+                        )
 
-                    # Add to candidates for exploration
-                    heapq.heappush(candidates, (neighbor_dist, neighbor_idx))
+                    # Add to exploration queue
+                    heapq.heappush(candidates_heap, (neighbor_dist, neighbor_idx))
 
                     # Update working set
                     if len(working_set) < L:
@@ -179,101 +299,70 @@ class FANNG(BaseProximityGraph):
                     elif neighbor_dist < -working_set[0][0]:
                         heapq.heapreplace(working_set, (-neighbor_dist, neighbor_idx))
 
-        # Convert working set to sorted list of candidates
-        result = [(-dist, idx) for dist, idx in working_set]
-        result.sort()
-        return result
+        # Convert to sorted array
+        result_size = len(working_set)
+        result_indices = np.empty(result_size, dtype=np.int32)
+        result_distances = np.empty(result_size, dtype=np.float32)
 
-    def _select_neighbors_fanng(
+        for i in range(result_size):
+            dist, idx = heapq.heappop(working_set)
+            result_distances[i] = -dist
+            result_indices[i] = idx
+
+        # Sort by distance
+        sort_order = np.argsort(result_distances)
+        return result_indices[sort_order]
+
+    def _select_neighbors_optimized(
         self,
         henn_points: np.ndarray,
         node_idx: int,
-        candidates: List[Tuple[float, int]],
+        candidate_indices: np.ndarray,
         K: int,
         alpha: float,
-    ) -> List[int]:
+    ) -> np.ndarray:
         """
-        Select neighbors using FANNG's diversity-based selection.
-
-        This implements a greedy algorithm that selects neighbors to maximize
-        diversity while maintaining proximity.
+        Optimized neighbor selection using numba-compiled function.
         """
-        if len(candidates) <= K:
-            return [idx for _, idx in candidates]
+        if len(candidate_indices) <= K:
+            return candidate_indices
 
-        node_point = henn_points[node_idx]
-        selected = []
+        # Compute distances to all candidates
+        query_point = henn_points[node_idx]
+        if self.distance_type == 0:  # L2
+            distances = compute_l2_distances_batch(
+                query_point, henn_points, candidate_indices
+            )
+        else:  # cosine
+            distances = compute_cosine_distances_batch(
+                query_point, henn_points, candidate_indices
+            )
 
-        # Convert to list for easier manipulation
-        remaining_candidates = candidates.copy()
-
-        while len(selected) < K and remaining_candidates:
-            best_candidate = None
-            best_score = float("inf")
-
-            for i, (dist_to_node, candidate_idx) in enumerate(remaining_candidates):
-                candidate_point = henn_points[candidate_idx]
-
-                # Calculate diversity score
-                max_similarity = 0.0
-                for selected_idx in selected:
-                    selected_point = henn_points[selected_idx]
-
-                    # Distance from candidate to selected neighbor
-                    if self.distance == "cosine":
-                        cand_to_sel = 1 - np.dot(candidate_point, selected_point)
-                    else:  # Default to L2 distance
-                        cand_to_sel = np.linalg.norm(candidate_point - selected_point)
-
-                    # Similarity score (lower distance = higher similarity)
-                    if cand_to_sel > 0:
-                        similarity = dist_to_node / cand_to_sel
-                        max_similarity = max(max_similarity, similarity)
-
-                # Score combines distance and diversity
-                # Lower score is better
-                score = dist_to_node + alpha * max_similarity
-
-                if score < best_score:
-                    best_score = score
-                    best_candidate = i
-
-            if best_candidate is not None:
-                _, selected_idx = remaining_candidates.pop(best_candidate)
-                selected.append(selected_idx)
+        # Use optimized selection
+        selected = fast_neighbor_selection(
+            distances,
+            candidate_indices,
+            henn_points,
+            query_point,
+            K,
+            alpha,
+            self.distance_type,
+        )
 
         return selected
 
-    # def _prune_neighbors(
-    #     self,
-    #     henn_points: np.ndarray,
-    #     node_idx: int,
-    #     neighbors: List[int],
-    #     K: int,
-    #     alpha: float,
-    # ) -> List[int]:
-    #     """
-    #     Prune neighbors to maintain degree limit while preserving quality.
-    #     """
-    #     if len(neighbors) <= K:
-    #         return neighbors
+    def _add_reverse_links_batch(
+        self, graph: Dict[int, List[int]], node_idx: int, selected_neighbors: np.ndarray
+    ):
+        """
+        Efficiently add reverse links in batch.
+        """
+        for neighbor_idx in selected_neighbors:
+            neighbor_list = graph[neighbor_idx]
+            if node_idx not in neighbor_list:
+                neighbor_list.append(node_idx)
 
-    #     node_point = henn_points[node_idx]
-
-    #     # Calculate distances to all neighbors
-    #     neighbor_distances = []
-    #     for neighbor_idx in neighbors:
-    #         dist = np.linalg.norm(henn_points[neighbor_idx] - node_point)
-    #         neighbor_distances.append((dist, neighbor_idx))
-
-    #     # Use same selection strategy as neighbor selection
-    #     selected = self._select_neighbors_fanng(
-    #         henn_points, node_idx, neighbor_distances, K, alpha
-    #     )
-
-    #     return selected
-
-    def _update_reverse_links(
+    def _update_reverse_links_optimized(
         self,
         henn_points: np.ndarray,
         new_node_idx: int,
@@ -284,54 +373,64 @@ class FANNG(BaseProximityGraph):
         alpha: float,
     ):
         """
-        Update reverse links for existing nodes when a new node is added.
+        Optimized reverse link updates with vectorized distance computation.
         """
+        if len(inserted_nodes) <= 1:
+            return
+
         new_point = henn_points[new_node_idx]
 
-        # Find R closest existing nodes to consider for reverse linking
-        distances = []
-        for node_idx in inserted_nodes:
-            if node_idx != new_node_idx:
-                if self.distance == "cosine":
-                    dist = 1 - np.dot(henn_points[node_idx], new_point)
-                else:  # Default to L2 distance
-                    dist = np.linalg.norm(henn_points[node_idx] - new_point)
-                distances.append((dist, node_idx))
+        # Vectorized distance computation to all inserted nodes
+        inserted_indices = np.array(
+            [idx for idx in inserted_nodes if idx != new_node_idx], dtype=np.int32
+        )
+        if len(inserted_indices) == 0:
+            return
 
-        distances.sort()
-        close_nodes = distances[:R]
+        if self.distance_type == 0:  # L2
+            distances = compute_l2_distances_batch(
+                new_point, henn_points, inserted_indices
+            )
+        else:  # cosine
+            distances = compute_cosine_distances_batch(
+                new_point, henn_points, inserted_indices
+            )
 
-        # For each close node, consider adding new_node as neighbor
-        for dist, node_idx in close_nodes:
-            current_neighbors = graph[node_idx].copy()
+        # Find R closest nodes efficiently
+        if len(distances) <= R:
+            close_indices = inserted_indices
+        else:
+            closest_indices = np.argpartition(distances, R)[:R]
+            close_indices = inserted_indices[closest_indices]
 
-            # Add new node as candidate
+        # Update reverse links for close nodes
+        for node_idx in close_indices:
+            current_neighbors = graph[node_idx]
+
             if new_node_idx not in current_neighbors:
                 current_neighbors.append(new_node_idx)
 
-                # If exceeds degree limit, prune
-                if len(current_neighbors) > K:
-                    # Calculate distances for pruning
-                    neighbor_distances = []
+                # Prune if necessary (less aggressive pruning)
+                if len(current_neighbors) > K * 1.5:  # Allow some degree variance
+                    # Quick pruning - remove farthest neighbor
                     node_point = henn_points[node_idx]
+                    max_dist = -1
+                    worst_neighbor = None
+
                     for neighbor_idx in current_neighbors:
-                        if self.distance == "cosine":
-                            neighbor_dist = 1 - np.dot(
-                                henn_points[neighbor_idx], node_point
-                            )
-                        else:  # Default to L2 distance
-                            neighbor_dist = np.linalg.norm(
+                        if self.distance_type == 0:
+                            dist = np.linalg.norm(
                                 henn_points[neighbor_idx] - node_point
                             )
-                        neighbor_distances.append((neighbor_dist, neighbor_idx))
+                        else:
+                            dist = 1 - np.dot(henn_points[neighbor_idx], node_point)
 
-                    # Select best neighbors
-                    selected = self._select_neighbors_fanng(
-                        henn_points, node_idx, neighbor_distances, K, alpha
-                    )
-                    graph[node_idx] = selected
-                else:
-                    graph[node_idx] = current_neighbors
+                        if dist > max_dist:
+                            max_dist = dist
+                            worst_neighbor = neighbor_idx
+
+                    if worst_neighbor is not None:
+                        current_neighbors.remove(worst_neighbor)
 
     def _find_entry_point(self, graph: Dict[int, List[int]], layer_indices: list):
         """

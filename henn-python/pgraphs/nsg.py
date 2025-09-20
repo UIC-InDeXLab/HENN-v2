@@ -14,6 +14,16 @@ class NSG(BaseProximityGraph):
     1. Use a navigation node (medoid) as entry point
     2. Build graph with controlled out-degree using neighbor selection strategy
     3. Ensure strong connectivity through pruning and reconnection
+
+    Medoid Finding Optimization:
+    - "original": O(n²) implementation with nested loops (default, most accurate)
+    - "vectorized": Vectorized NumPy operations (much faster for medium/large datasets)
+    - "sampling": Sampling-based approximation (fastest for very large datasets)
+
+    Connectivity Optimization:
+    - "original": Original O(n²) connectivity ensuring (for small datasets)
+    - "vectorized": Vectorized batch processing (default, good for most datasets)
+    - "approximate": Sampling-based approximation (fastest for very large datasets >10k points)
     """
 
     def __init__(
@@ -21,9 +31,17 @@ class NSG(BaseProximityGraph):
         distance: str = "l2",
         enable_logging: bool = False,
         log_level: str = "INFO",
+        medoid_method: str = "original",
+        medoid_sample_size: int = 1000,
+        connectivity_optimization: str = "vectorized",
     ):
         super().__init__(distance, enable_logging, log_level)
         self.init_node = None
+        self.medoid_method = medoid_method  # "original", "vectorized", "sampling"
+        self.medoid_sample_size = medoid_sample_size
+        self.connectivity_optimization = (
+            connectivity_optimization  # "original", "vectorized", "approximate"
+        )
 
     def build_graph(
         self, henn_points: np.ndarray, layer_indices: list, params: dict = None
@@ -73,7 +91,7 @@ class NSG(BaseProximityGraph):
 
         # Step 4: Ensure connectivity
         print("Ensuring graph connectivity...")
-        final_graph = self._ensure_connectivity(
+        final_graph = self._ensure_connectivity_optimized(
             henn_points, layer_indices, nsg_graph, navigation_node
         )
 
@@ -110,6 +128,11 @@ class NSG(BaseProximityGraph):
         """
         Find the medoid (most central point) to use as navigation node.
 
+        Uses different optimization strategies based on self.medoid_method:
+        - "original": Original O(n²) implementation (default)
+        - "vectorized": Vectorized NumPy operations for speed
+        - "sampling": Sampling-based approximation for large datasets
+
         Args:
             henn_points: All points in the HENN structure
             layer_indices: List of global indices for points in this layer
@@ -120,12 +143,34 @@ class NSG(BaseProximityGraph):
         if len(layer_indices) == 1:
             return layer_indices[0]
 
+        if self.medoid_method == "vectorized":
+            return self._find_medoid_vectorized(henn_points, layer_indices)
+        elif self.medoid_method == "sampling":
+            return self._find_medoid_sampling(henn_points, layer_indices)
+        else:
+            return self._find_medoid_original(henn_points, layer_indices)
+
+    def _find_medoid_original(
+        self, henn_points: np.ndarray, layer_indices: list
+    ) -> int:
+        """
+        Original medoid finding implementation (O(n²)).
+
+        Args:
+            henn_points: All points in the HENN structure
+            layer_indices: List of global indices for points in this layer
+
+        Returns:
+            Global index of the medoid point
+        """
         min_sum_dist = float("inf")
         medoid_idx = layer_indices[0]
 
         # Calculate sum of distances for each point to all other points
         for i, idx_i in tqdm(
-            enumerate(layer_indices), desc="Finding medoid", total=len(layer_indices)
+            enumerate(layer_indices),
+            desc="Finding medoid (original)",
+            total=len(layer_indices),
         ):
             sum_dist = 0.0
             point_i = henn_points[idx_i]
@@ -145,11 +190,128 @@ class NSG(BaseProximityGraph):
 
         return medoid_idx
 
+    def _find_medoid_vectorized(
+        self, henn_points: np.ndarray, layer_indices: list
+    ) -> int:
+        """
+        Vectorized medoid finding implementation using NumPy operations.
+        Much faster than original for larger datasets.
+
+        Args:
+            henn_points: All points in the HENN structure
+            layer_indices: List of global indices for points in this layer
+
+        Returns:
+            Global index of the medoid point
+        """
+        # Extract points for this layer
+        layer_points = henn_points[layer_indices]  # Shape: (n, d)
+        n = len(layer_indices)
+
+        if self.distance == "cosine":
+            # Normalize points for cosine distance
+            # layer_points_norm = layer_points / np.linalg.norm(layer_points, axis=1, keepdims=True)
+
+            # Compute cosine similarity matrix
+            sim_matrix = np.dot(layer_points, layer_points.T)
+
+            # Convert to cosine distance matrix
+            dist_matrix = 1 - sim_matrix
+
+        else:  # L2 distance
+            # Compute pairwise L2 distances using broadcasting
+            # ||a - b||² = ||a||² + ||b||² - 2*a·b
+            squared_norms = np.sum(layer_points**2, axis=1)
+            dot_products = np.dot(layer_points, layer_points.T)
+
+            # Broadcasting to compute distance matrix
+            dist_matrix = (
+                squared_norms[:, np.newaxis]
+                + squared_norms[np.newaxis, :]
+                - 2 * dot_products
+            )
+            dist_matrix = np.sqrt(
+                np.maximum(dist_matrix, 0)
+            )  # Ensure non-negative due to numerical errors
+
+        # Set diagonal to 0 (distance from point to itself)
+        np.fill_diagonal(dist_matrix, 0)
+
+        # Sum distances for each point
+        sum_distances = np.sum(dist_matrix, axis=1)
+
+        # Find medoid (point with minimum sum of distances)
+        medoid_local_idx = np.argmin(sum_distances)
+        medoid_global_idx = layer_indices[medoid_local_idx]
+
+        return medoid_global_idx
+
+    def _find_medoid_sampling(
+        self, henn_points: np.ndarray, layer_indices: list
+    ) -> int:
+        """
+        Sampling-based approximation for medoid finding.
+        Useful for very large datasets where exact computation is too slow.
+
+        Args:
+            henn_points: All points in the HENN structure
+            layer_indices: List of global indices for points in this layer
+
+        Returns:
+            Global index of the approximate medoid point
+        """
+        n = len(layer_indices)
+
+        # If dataset is small, use vectorized method
+        if n <= self.medoid_sample_size:
+            return self._find_medoid_vectorized(henn_points, layer_indices)
+
+        # Sample candidate points
+        sample_size = min(self.medoid_sample_size, n)
+        sampled_indices = np.random.choice(
+            layer_indices, size=sample_size, replace=False
+        )
+
+        # For each sampled candidate, compute average distance to a subset of all points
+        eval_sample_size = min(500, n)  # Sample points to evaluate against
+        eval_indices = np.random.choice(
+            layer_indices, size=eval_sample_size, replace=False
+        )
+
+        min_avg_dist = float("inf")
+        best_candidate = sampled_indices[0]
+
+        for candidate_idx in tqdm(sampled_indices, desc="Finding medoid (sampling)"):
+            candidate_point = henn_points[candidate_idx]
+            total_dist = 0.0
+
+            for eval_idx in eval_indices:
+                if candidate_idx != eval_idx:
+                    eval_point = henn_points[eval_idx]
+                    if self.distance == "cosine":
+                        dist = 1 - np.dot(candidate_point, eval_point)
+                    else:
+                        dist = np.linalg.norm(candidate_point - eval_point)
+                    total_dist += dist
+
+            avg_dist = (
+                total_dist / (len(eval_indices) - 1)
+                if candidate_idx in eval_indices
+                else total_dist / len(eval_indices)
+            )
+
+            if avg_dist < min_avg_dist:
+                min_avg_dist = avg_dist
+                best_candidate = candidate_idx
+
+        return best_candidate
+
     def _build_initial_knn_graph(
         self, henn_points: np.ndarray, layer_indices: list, k: int
     ) -> Dict[int, List[int]]:
         """
         Build initial k-NN graph as starting point for NSG construction.
+        Uses memory-efficient chunked processing similar to knn.py.
 
         Args:
             henn_points: All points in the HENN structure
@@ -159,29 +321,86 @@ class NSG(BaseProximityGraph):
         Returns:
             Dictionary mapping global indices to lists of k nearest neighbors
         """
-        knn_graph = {idx: [] for idx in layer_indices}
+        chunk_size = 1000  # Process in chunks to save memory
+        layer_points = henn_points[layer_indices]
+        n = len(layer_indices)
 
-        for i, idx_i in tqdm(
-            enumerate(layer_indices),
-            desc="Building initial k-NN graph",
-            total=len(layer_indices),
+        if n == 0:
+            return {}
+
+        if n == 1:
+            return {layer_indices[0]: []}
+
+        # Limit k to maximum possible neighbors
+        k = min(k, n - 1)
+
+        print(
+            f"Building initial k-NN graph with memory-efficient chunked processing for {n} points..."
+        )
+        print(f"Using chunk size: {chunk_size}, k: {k}")
+
+        # Pre-compute normalized points for cosine distance
+        if self.distance == "cosine":
+            norms = np.linalg.norm(layer_points, axis=1, keepdims=True)
+            norms[norms == 0] = 1  # Avoid division by zero
+            normalized_points = layer_points / norms
+        else:
+            # Pre-compute squared norms for L2 distance
+            points_squared = np.sum(layer_points**2, axis=1)
+            normalized_points = None
+
+        knn_graph = {}
+
+        # Process points in chunks to avoid memory overflow
+        for chunk_start in tqdm(
+            range(0, n, chunk_size), desc="Processing chunks for initial k-NN"
         ):
-            point_i = henn_points[idx_i]
+            chunk_end = min(chunk_start + chunk_size, n)
+            chunk_indices = range(chunk_start, chunk_end)
+            chunk_points = layer_points[chunk_indices]
 
-            # Calculate distances to all other points
-            distances = []
-            for j, idx_j in enumerate(layer_indices):
-                if i != j:
-                    point_j = henn_points[idx_j]
-                    if self.distance == "cosine":
-                        dist = 1 - np.dot(point_i, point_j)
-                    else:
-                        dist = np.linalg.norm(point_i - point_j)
-                    distances.append((dist, idx_j))
+            if self.distance == "cosine":
+                chunk_normalized = normalized_points[chunk_indices]
+                # Compute cosine similarities for this chunk against all points
+                similarity_matrix = chunk_normalized @ normalized_points.T
+                # Convert to distance matrix (cosine distance = 1 - cosine similarity)
+                distance_matrix = 1 - similarity_matrix
+            else:
+                # Compute L2 distances for this chunk against all points
+                # ||a - b||^2 = ||a||^2 + ||b||^2 - 2*a^T*b
+                chunk_squared = points_squared[chunk_indices]
+                distance_matrix = (
+                    chunk_squared[:, np.newaxis]
+                    + points_squared[np.newaxis, :]
+                    - 2 * chunk_points @ layer_points.T
+                )
+                # Take square root and ensure non-negative (numerical stability)
+                distance_matrix = np.sqrt(np.maximum(distance_matrix, 0))
 
-            # Sort by distance and take k nearest
-            distances.sort()
-            knn_graph[idx_i] = [idx_j for _, idx_j in distances[:k]]
+            # Set distances to self as infinity to exclude self-connections
+            for i, global_i in enumerate(chunk_indices):
+                distance_matrix[i, global_i] = np.inf
+
+            # Find k nearest neighbors for each point in this chunk
+            if k < n // 2:
+                # Use argpartition for efficiency when k is small
+                knn_indices = np.argpartition(distance_matrix, k, axis=1)[:, :k]
+
+                # Sort only the k nearest neighbors for each point
+                for i in range(len(chunk_indices)):
+                    sorted_idx = np.argsort(distance_matrix[i, knn_indices[i]])
+                    knn_indices[i] = knn_indices[i, sorted_idx]
+            else:
+                # Use argsort when k is large (close to n)
+                knn_indices = np.argsort(distance_matrix, axis=1)[:, :k]
+
+            # Build adjacency list for this chunk
+            for i, local_idx in enumerate(chunk_indices):
+                global_idx = layer_indices[local_idx]
+                neighbor_local_indices = knn_indices[i]
+                knn_graph[global_idx] = [
+                    layer_indices[j] for j in neighbor_local_indices
+                ]
 
         return knn_graph
 
@@ -389,7 +608,7 @@ class NSG(BaseProximityGraph):
     ) -> Dict[int, List[int]]:
         """
         Ensure the graph is strongly connected by adding necessary edges.
-        Maintains degree constraints during connectivity enforcement.
+        Optimized version using vectorized operations for large datasets.
 
         Args:
             henn_points: All points in the HENN structure
@@ -399,6 +618,149 @@ class NSG(BaseProximityGraph):
 
         Returns:
             Connected NSG graph
+        """
+        # Find nodes that are not reachable from navigation node using BFS
+        reachable = set()
+        queue = [navigation_node]
+        reachable.add(navigation_node)
+
+        print("Checking graph connectivity...")
+        while queue:
+            current = queue.pop(0)
+
+            for neighbor in nsg_graph[current]:
+                if neighbor not in reachable:
+                    reachable.add(neighbor)
+                    queue.append(neighbor)
+
+        # Find unreachable nodes
+        unreachable_nodes = [idx for idx in layer_indices if idx not in reachable]
+
+        if not unreachable_nodes:
+            return nsg_graph  # Already connected
+
+        print(
+            f"Found {len(unreachable_nodes)} unreachable nodes out of {len(layer_indices)}"
+        )
+
+        # Convert to numpy arrays for vectorized operations
+        reachable_list = list(reachable)
+        reachable_points = henn_points[reachable_list]
+        unreachable_points = henn_points[unreachable_nodes]
+
+        # Process unreachable nodes in batches for memory efficiency
+        batch_size = min(1000, len(unreachable_nodes))
+
+        for batch_start in tqdm(
+            range(0, len(unreachable_nodes), batch_size),
+            desc="Ensuring connectivity (batched)",
+        ):
+            batch_end = min(batch_start + batch_size, len(unreachable_nodes))
+            batch_unreachable = unreachable_nodes[batch_start:batch_end]
+            batch_points = unreachable_points[batch_start:batch_end]
+
+            # Vectorized distance computation for this batch
+            if self.distance == "cosine":
+                # Normalize points for cosine distance
+                batch_norm = np.linalg.norm(batch_points, axis=1, keepdims=True)
+                batch_norm[batch_norm == 0] = 1
+                batch_normalized = batch_points / batch_norm
+
+                reachable_norm = np.linalg.norm(reachable_points, axis=1, keepdims=True)
+                reachable_norm[reachable_norm == 0] = 1
+                reachable_normalized = reachable_points / reachable_norm
+
+                # Compute cosine similarities: (batch_size, num_reachable)
+                similarities = batch_normalized @ reachable_normalized.T
+                # Convert to distances
+                distances = 1 - similarities
+
+            else:  # L2 distance
+                # Compute pairwise L2 distances using broadcasting
+                # Shape: (batch_size, 1, dim) and (1, num_reachable, dim)
+                batch_expanded = batch_points[:, np.newaxis, :]
+                reachable_expanded = reachable_points[np.newaxis, :, :]
+
+                # Compute squared differences and sum over last dimension
+                diff_squared = np.sum(
+                    (batch_expanded - reachable_expanded) ** 2, axis=2
+                )
+                distances = np.sqrt(diff_squared)
+
+            # Find closest reachable node for each unreachable node in batch
+            closest_indices = np.argmin(distances, axis=1)
+
+            # Add connections
+            for i, unreachable_idx in enumerate(batch_unreachable):
+                closest_reachable_idx = reachable_list[closest_indices[i]]
+
+                # Add bidirectional connection for better connectivity
+                if closest_reachable_idx not in nsg_graph[unreachable_idx]:
+                    nsg_graph[unreachable_idx].append(closest_reachable_idx)
+
+                # Optionally add reverse connection if it doesn't exceed degree limit
+                # This helps with connectivity but maintains sparsity
+                max_degree = 32  # Conservative limit to maintain sparsity
+                if (
+                    len(nsg_graph[closest_reachable_idx]) < max_degree
+                    and unreachable_idx not in nsg_graph[closest_reachable_idx]
+                ):
+                    nsg_graph[closest_reachable_idx].append(unreachable_idx)
+
+                # Add to reachable set for subsequent batches
+                reachable.add(unreachable_idx)
+                reachable_list.append(unreachable_idx)
+
+            # Update reachable_points for next batch if there are more batches
+            if batch_end < len(unreachable_nodes):
+                reachable_points = henn_points[reachable_list]
+
+        return nsg_graph
+
+    def _ensure_connectivity_optimized(
+        self,
+        henn_points: np.ndarray,
+        layer_indices: list,
+        nsg_graph: Dict[int, List[int]],
+        navigation_node: int,
+    ) -> Dict[int, List[int]]:
+        """
+        Optimized connectivity ensuring that chooses the best strategy based on dataset size.
+
+        Args:
+            henn_points: All points in the HENN structure
+            layer_indices: List of global indices for points in this layer
+            nsg_graph: Current NSG graph
+            navigation_node: Global index of navigation node
+
+        Returns:
+            Connected NSG graph
+        """
+        n = len(layer_indices)
+
+        # Choose strategy based on dataset size and optimization setting
+        if self.connectivity_optimization == "original" or n < 1000:
+            return self._ensure_connectivity_original(
+                henn_points, layer_indices, nsg_graph, navigation_node
+            )
+        elif self.connectivity_optimization == "approximate" and n > 10000:
+            return self._ensure_connectivity_approximate(
+                henn_points, layer_indices, nsg_graph, navigation_node
+            )
+        else:
+            return self._ensure_connectivity(
+                henn_points, layer_indices, nsg_graph, navigation_node
+            )
+
+    def _ensure_connectivity_original(
+        self,
+        henn_points: np.ndarray,
+        layer_indices: list,
+        nsg_graph: Dict[int, List[int]],
+        navigation_node: int,
+    ) -> Dict[int, List[int]]:
+        """
+        Original connectivity ensuring method (kept for compatibility).
         """
         # Find nodes that are not reachable from navigation node
         reachable = set()
@@ -437,7 +799,6 @@ class NSG(BaseProximityGraph):
                     closest_reachable = reachable_idx
 
             # Add connection from unreachable to closest reachable
-            # (unidirectional to maintain degree constraints)
             if closest_reachable is not None:
                 if closest_reachable not in nsg_graph[unreachable_idx]:
                     nsg_graph[unreachable_idx].append(closest_reachable)
@@ -445,3 +806,125 @@ class NSG(BaseProximityGraph):
                 reachable.add(unreachable_idx)
 
         return nsg_graph
+
+    def _ensure_connectivity_approximate(
+        self,
+        henn_points: np.ndarray,
+        layer_indices: list,
+        nsg_graph: Dict[int, List[int]],
+        navigation_node: int,
+    ) -> Dict[int, List[int]]:
+        """
+        Approximate connectivity ensuring for very large datasets.
+        Uses sampling and hierarchical approaches to reduce complexity.
+        """
+        # Find nodes that are not reachable from navigation node using BFS
+        reachable = set()
+        queue = [navigation_node]
+        reachable.add(navigation_node)
+
+        print("Checking graph connectivity...")
+        while queue:
+            current = queue.pop(0)
+
+            for neighbor in nsg_graph[current]:
+                if neighbor not in reachable:
+                    reachable.add(neighbor)
+                    queue.append(neighbor)
+
+        # Find unreachable nodes
+        unreachable_nodes = [idx for idx in layer_indices if idx not in reachable]
+
+        if not unreachable_nodes:
+            return nsg_graph
+
+        print(
+            f"Found {len(unreachable_nodes)} unreachable nodes out of {len(layer_indices)}"
+        )
+
+        # For very large datasets, use sampling-based approach
+        reachable_list = list(reachable)
+
+        # Sample representative points from reachable set for efficiency
+        max_reachable_sample = min(2000, len(reachable_list))
+        if len(reachable_list) > max_reachable_sample:
+            sampled_reachable = np.random.choice(
+                reachable_list, size=max_reachable_sample, replace=False
+            ).tolist()
+        else:
+            sampled_reachable = reachable_list
+
+        # Process unreachable nodes in large batches
+        batch_size = min(2000, len(unreachable_nodes))
+
+        for batch_start in tqdm(
+            range(0, len(unreachable_nodes), batch_size),
+            desc="Ensuring connectivity (approximate)",
+        ):
+            batch_end = min(batch_start + batch_size, len(unreachable_nodes))
+            batch_unreachable = unreachable_nodes[batch_start:batch_end]
+
+            # Use sampled reachable points for distance computation
+            self._connect_batch_to_reachable(
+                henn_points, batch_unreachable, sampled_reachable, nsg_graph
+            )
+
+            # Add newly connected nodes to reachable set
+            reachable.update(batch_unreachable)
+
+        return nsg_graph
+
+    def _connect_batch_to_reachable(
+        self,
+        henn_points: np.ndarray,
+        batch_unreachable: List[int],
+        sampled_reachable: List[int],
+        nsg_graph: Dict[int, List[int]],
+    ):
+        """
+        Connect a batch of unreachable nodes to sampled reachable nodes efficiently.
+        """
+        batch_points = henn_points[batch_unreachable]
+        reachable_points = henn_points[sampled_reachable]
+
+        # Vectorized distance computation
+        if self.distance == "cosine":
+            # Normalize points
+            batch_norm = np.linalg.norm(batch_points, axis=1, keepdims=True)
+            batch_norm[batch_norm == 0] = 1
+            batch_normalized = batch_points / batch_norm
+
+            reachable_norm = np.linalg.norm(reachable_points, axis=1, keepdims=True)
+            reachable_norm[reachable_norm == 0] = 1
+            reachable_normalized = reachable_points / reachable_norm
+
+            # Compute cosine similarities
+            similarities = batch_normalized @ reachable_normalized.T
+            distances = 1 - similarities
+
+        else:  # L2 distance
+            # For very large batches, use chunked computation to save memory
+            chunk_size = 500
+            distances = np.zeros((len(batch_unreachable), len(sampled_reachable)))
+
+            for i in range(0, len(batch_unreachable), chunk_size):
+                end_i = min(i + chunk_size, len(batch_unreachable))
+                chunk_batch = batch_points[i:end_i]
+
+                # Compute distances for this chunk
+                chunk_expanded = chunk_batch[:, np.newaxis, :]
+                reachable_expanded = reachable_points[np.newaxis, :, :]
+                chunk_distances = np.sqrt(
+                    np.sum((chunk_expanded - reachable_expanded) ** 2, axis=2)
+                )
+                distances[i:end_i] = chunk_distances
+
+        # Find closest reachable node for each unreachable node
+        closest_indices = np.argmin(distances, axis=1)
+
+        # Add connections
+        for i, unreachable_idx in enumerate(batch_unreachable):
+            closest_reachable_idx = sampled_reachable[closest_indices[i]]
+
+            if closest_reachable_idx not in nsg_graph[unreachable_idx]:
+                nsg_graph[unreachable_idx].append(closest_reachable_idx)
