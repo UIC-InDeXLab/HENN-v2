@@ -63,7 +63,7 @@ class NSG(BaseProximityGraph):
             params = {}
 
         # Default parameters
-        R = params.get("R", 16)  # Maximum out-degree
+        R = params.get("k", 16)  # Maximum out-degree
         L = params.get("L", 100)  # Search list size during construction
         C = params.get("C", 500)  # Maximum candidates for neighbor selection
 

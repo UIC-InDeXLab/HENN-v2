@@ -146,7 +146,7 @@ class FANNG(BaseProximityGraph):
         if params is None:
             params = {}
 
-        K = params.get("K", 16)  # Target degree
+        K = params.get("k", 16)  # Target degree
         L = params.get("L", 32)  # Search candidate pool size
         R = params.get("R", 16)  # Reverse link consideration
         alpha = params.get("alpha", 1.2)  # Pruning parameter

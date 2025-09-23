@@ -1,6 +1,7 @@
 import numpy as np
 from epsnet.base_epsnet import BaseEPSNet
 from epsnet.random_sample import RandomSample
+from epsnet.budgetaware import BudgetAware
 from pgraphs.base_pgraph import BaseProximityGraph
 from pgraphs.knn import Knn
 from pgraphs.nsw import NSW
@@ -14,7 +15,7 @@ import logging
 class HENNConfig:
     def __init__(
         self,
-        epsnet_algorithm: str = "random",  # random, discrepancy, budget-aware
+        epsnet_algorithm: str = "random",  # random, sketchmerge, budget-aware
         epsnet_params: dict = None,
         pgraph_algorithm: str = "NSW",  # nsw, knn, nsg, fanng, kgraph
         pgraph_params: dict = None,
@@ -22,56 +23,36 @@ class HENNConfig:
         log_level: str = "INFO",
         distance: str = "l2",  # 'l2' or 'cosine'
     ):
-        # TODO: build an instance of base_epsnet
-        self.epsnet_algorithm = RandomSample()
+        if epsnet_algorithm.lower() == "random":
+            self.epsnet_algorithm = RandomSample()
+        elif epsnet_algorithm.lower() == "budget-aware":
+            self.epsnet_algorithm = BudgetAware(distance=distance, fast_diversity=True)
+        else:
+            # other
+            self.epsnet_algorithm = RandomSample()
+
         self.epsnet_params = epsnet_params or {}
         self.distance = distance
+        self.pgraph_params = pgraph_params
 
         # Build an instance of base_pgraph based on algorithm choice
         if pgraph_algorithm.lower() == "knn":
             self.pgraph_algorithm = Knn(distance=distance)
-            # Provide default parameters for KNN if none specified
-            if not pgraph_params:
-                self.pgraph_params = {"k": 16}
-            else:
-                self.pgraph_params = pgraph_params
         elif pgraph_algorithm.lower() == "nsw":
             self.pgraph_algorithm = NSW(distance=distance)
-            # Provide default parameters for NSW if none specified
-            if not pgraph_params:
-                self.pgraph_params = {"M": 16, "efConstruction": 200}
-            else:
-                self.pgraph_params = pgraph_params
         elif pgraph_algorithm.lower() == "nsg":
-            self.pgraph_algorithm = NSG(distance=distance)
-            # Provide default parameters for NSG if none specified
-            if not pgraph_params:
-                self.pgraph_params = {"R": 16, "L": 100, "C": 300}
-            else:
-                self.pgraph_params = pgraph_params
+            self.pgraph_algorithm = NSG(
+                distance=distance,
+                medoid_method="sampling",
+                connectivity_optimization="approximate",
+            )
         elif pgraph_algorithm.lower() == "fanng":
             self.pgraph_algorithm = FANNG(distance=distance)
-            # Provide default parameters for FANNG if none specified
-            if not pgraph_params:
-                self.pgraph_params = {"K": 16, "L": 32, "R": 16, "alpha": 1.2}
-            else:
-                self.pgraph_params = pgraph_params
         elif pgraph_algorithm.lower() == "kgraph":
             self.pgraph_algorithm = KGraph(distance=distance)
-            # Provide default parameters for KGraph if none specified
-            if not pgraph_params:
-                self.pgraph_params = {
-                    "k": 16,
-                    "rho": 0.5,
-                    "delta": 0.001,
-                    "max_iterations": 10,
-                }
-            else:
-                self.pgraph_params = pgraph_params
         else:
             # Default to NSW
             self.pgraph_algorithm = NSW()
-            self.pgraph_params = pgraph_params or {"M": 16, "efConstruction": 200}
 
         self.enable_logging = enable_logging
         self.log_level = log_level
@@ -252,7 +233,7 @@ class HENN:
             self.logger.debug(f"Building layer {l+1}/{self.L}")
             layer = Layer(self.points)  # Pass reference to all points
             expected_size = self.n // (self.exp_decay**l)
-            self.logger.debug(f"Expected epsnet size for layer {l+1}: {expected_size}")
+            self.logger.info(f"Expected epsnet size for layer {l+1}: {expected_size}")
 
             # Build epsnet from current indices - returns local indices within current_indices
             current_points = self.points[current_indices]
@@ -273,6 +254,32 @@ class HENN:
             current_indices = selected_global_indices
 
         self.logger.info("HENN build completed successfully")
+
+    def search_nearest(self, query_point: np.ndarray):
+        hops = 0
+        layers = self.layers
+        layers = layers[::-1]  # Reverse for top-down search
+
+        local_idx = np.random.randint(0, layers[0].n)
+        global_idx = layers[0].indices[local_idx]
+
+        for layer in layers:
+            while True:
+                neighbors = layer.edges[global_idx]
+                best_neighbor_global = None
+                best_dist = np.linalg.norm(self.points[global_idx] - query_point)
+                for neighbor_global in neighbors[:self.config.pgraph_params["k"]]:
+                    neighbor_point = self.points[neighbor_global]
+                    dist = np.linalg.norm(neighbor_point - query_point)
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_neighbor_global = neighbor_global
+                if best_neighbor_global is not None:
+                    hops += 1
+                    global_idx = best_neighbor_global
+                else:
+                    break
+        return global_idx, hops
 
     def query(self, query_point: np.ndarray, k: int = 1, ef: int = 10):
         self.logger.debug(f"Querying for {k} nearest neighbors with ef={ef}")

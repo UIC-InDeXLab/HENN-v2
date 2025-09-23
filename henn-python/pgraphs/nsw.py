@@ -9,12 +9,14 @@ class NSW(BaseProximityGraph):
     def __init__(
         self,
         distance: str = "l2",
+        fast: bool = True,
         enable_logging: bool = False,
         log_level: str = "INFO",
     ):
         super().__init__(distance, enable_logging, log_level)
         """Initialize NSW graph."""
         self.init_node = None
+        self.fast = fast
 
     def build_graph(
         self,
@@ -81,8 +83,9 @@ class NSW(BaseProximityGraph):
                 edges[neighbor_idx].append(current_idx)
 
                 # Prune connections of neighbor if it exceeds max connections
-                # if len(edges[neighbor_idx]) > M:
-                # self._prune_connections(henn_points, neighbor_idx, M, edges)
+                if not self.fast:
+                    if len(edges[neighbor_idx]) > M:
+                        self._prune_connections(henn_points, neighbor_idx, M, edges)
 
             # Add current point to inserted set
             inserted_indices.append(current_idx)

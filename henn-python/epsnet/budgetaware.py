@@ -1,6 +1,7 @@
 import numpy as np
 import math
 import random
+from tqdm import tqdm
 from typing import List, Set, Tuple
 from epsnet.base_epsnet import BaseEPSNet
 
@@ -57,9 +58,12 @@ class BudgetAware(BaseEPSNet):
         size = min(size, n)
 
         if budget is None:
-            budget = max(1, size // 10)  # Default budget is 10% of size
+            budget = max(1, size)  # Default budget is 100% of size
             
         print(f"Budget-aware epsnet: budget={budget}, netsize={size}, n={n}")
+        
+        if size == n:
+            return list(range(n))
 
         # Initial sample size N = size - budget
         initial_n = max(1, size - budget)
@@ -71,7 +75,7 @@ class BudgetAware(BaseEPSNet):
         current_sample = set(np.random.choice(n, size=initial_n, replace=False))
 
         # Step 2: Budget-aware improvement
-        for step in range(budget):
+        for step in tqdm(range(budget)):
             # Find unhit balls and add points from them
             new_points = self._find_unhit_balls(points, current_sample, eps, size)
 
