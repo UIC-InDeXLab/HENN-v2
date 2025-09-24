@@ -1,0 +1,3 @@
+[submodule "henn-cpp"]
+	path = henn-cpp
+	url = https://github.com/facebookresearch/faiss.git
